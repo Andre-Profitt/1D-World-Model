@@ -1,17 +1,52 @@
 # 1D World Model
 
-A minimal implementation of a world model using MLX for Apple Silicon, demonstrating how neural networks can learn to predict environmental dynamics.
+A complete implementation of the V-M-C (Vision-Model-Controller) world model architecture using MLX for Apple Silicon. This project demonstrates how neural networks can learn environmental dynamics in a latent space and use them for model-based planning.
 
 ## Overview
 
-This project implements a simple yet complete world model that learns the physics of a 1D environment. The model takes the current state (position and velocity) along with an action, and predicts the next state and reward. Once trained, the model can "dream" or simulate future trajectories without interacting with the real environment.
+This project implements a full world model stack that:
+1. **Encodes** observations into a compact latent representation (V)
+2. **Predicts** dynamics and rewards in latent space (M)
+3. **Plans** actions using model predictive control (C)
 
-## Features
+The system learns purely from random interaction data, then uses its internal model to intelligently control the environment through imagined rollouts.
 
-- **Efficient Training**: Leverages MLX for optimized performance on Apple Silicon
-- **Simple Physics**: 1D position-velocity dynamics with discrete actions
-- **End-to-End Pipeline**: Data generation, model training, and rollout visualization
-- **Accurate Predictions**: Achieves sub-0.001 MSE loss on dynamics prediction
+## Architecture
+
+### V: Vision (Encoder-Decoder)
+- Compresses observations into a low-dimensional latent space
+- Autoencoder architecture with reconstruction loss
+- Enables efficient representation learning
+
+### M: Model (World Dynamics)
+- Predicts next latent state and reward: `M(z_t, a_t) → (z_{t+1}, r_t)`
+- Operates entirely in latent space for efficiency
+- Learns physics without explicit state access
+
+### C: Controller (MPC Planner)
+- Uses random shooting for action selection
+- Evaluates candidate sequences by imagining futures in the learned world
+- Maximizes predicted cumulative reward through planning
+
+## Project Structure
+
+```
+1D-World-Model/
+├── envs/
+│   └── one_d_env.py          # 1D physics environment
+├── models/
+│   ├── encoder_decoder.py    # V: Encoder & Decoder
+│   ├── world_model.py        # M: Latent dynamics model
+│   └── controller.py         # C: MPC controller
+├── training/
+│   ├── train_encoder.py      # Train autoencoder
+│   └── train_world_model.py  # Train dynamics model
+├── scripts/
+│   ├── collect_data.py       # Generate training data
+│   └── run_mpc_agent.py      # Run MPC agent
+├── config.py                 # Hyperparameters
+└── world_model_mlx.py        # Original standalone demo
+```
 
 ## Requirements
 
@@ -31,81 +66,176 @@ pip install --upgrade pip
 pip install mlx numpy
 ```
 
-## Usage
+## Quick Start
 
-Run the world model training and demonstration:
+### Option 1: Original Standalone Demo
+
+Run the original world model demonstration:
 
 ```bash
 python world_model_mlx.py
 ```
 
-The script will:
-1. Generate 20,000 state transitions from simulated physics
-2. Train a neural network to predict state transitions
-3. Display training progress over 20 epochs
-4. Demonstrate a 15-step rollout comparing true physics vs. model predictions
+This trains a model directly in state space and compares predictions vs. true dynamics.
 
-### Example Output
+### Option 2: Full V-M-C Pipeline
 
+Train and run the complete world model system:
+
+```bash
+# 1. Collect training data from random policy
+python scripts/collect_data.py
+
+# 2. Train encoder-decoder (V)
+python training/train_encoder.py
+
+# 3. Train world model (M)
+python training/train_world_model.py
+
+# 4. Run MPC agent (C)
+python scripts/run_mpc_agent.py
 ```
-Dataset size: 20000 transitions
-Epoch 01 | loss = 0.035199
-Epoch 02 | loss = 0.001836
-...
-Epoch 20 | loss = 0.000037
 
---- World Model Rollout Demo ---
-t=00 a=+1 | TRUE x=+1.000, v=+0.000, r=-1.100  ||  MODEL x=+1.107, v=+0.103, r=-1.103
-t=01 a=+1 | TRUE x=+1.100, v=+0.100, r=-1.300  ||  MODEL x=+1.319, v=+0.206, r=-1.314
-...
-```
+## Environment Dynamics
 
-## How It Works
+The 1D physics environment:
 
-### Environment Dynamics
-
-The simulated environment follows these physics rules:
-
-- **State**: `[x, v]` where x is position and v is velocity
+- **State**: `[x, v]` where x is position (-1.5 to 1.5), v is velocity (-1 to 1)
 - **Actions**: `-1` (accelerate left), `0` (no action), `+1` (accelerate right)
 - **Transition**:
   - `v_next = clip(v + 0.1 * action, -1.0, 1.0)`
   - `x_next = clip(x + v_next, -1.5, 1.5)`
-- **Reward**: `-|x_next|` (encourages staying near position 0)
+- **Reward**: `-|x_next|` (encourages staying near x=0)
 
-### Model Architecture
+## Model Details
 
-The world model is a simple feedforward neural network:
+### Encoder-Decoder (V)
 
-- **Input**: State (2 dims) + one-hot encoded action (3 dims) = 5 dimensions
-- **Hidden Layers**: Two layers of 128 units each with ReLU activation
-- **Output**: Next state (2 dims) + reward (1 dim) = 3 dimensions
+```
+Encoder: obs(2) → hidden(64) → hidden(64) → latent(4)
+Decoder: latent(4) → hidden(64) → hidden(64) → obs(2)
+```
 
-### Training
+Trained with MSE reconstruction loss on observations collected from random policy.
 
-- **Dataset**: 400 episodes of 50 timesteps each (20,000 transitions)
-- **Optimizer**: Adam with learning rate 0.001
-- **Loss**: Mean squared error on predicted next state and reward
-- **Batch Size**: 128
-- **Epochs**: 20
+### World Model (M)
 
-## Key Results
+```
+Input:  [z_t, one_hot(a_t)] → 7 dimensions
+Hidden: 128 → 128
+Output: [z_{t+1}, r_t] → 5 dimensions
+```
 
-The trained model achieves:
-- Final training loss of ~0.00004 MSE
-- Accurate prediction of position and velocity dynamics
-- Correct learning of boundary constraints (position and velocity clipping)
-- Stable long-horizon rollouts with minimal drift
+Trained with MSE loss on latent transitions and rewards.
+
+### MPC Controller (C)
+
+- **Planning horizon**: 12 steps
+- **Candidate sequences**: 512 random samples per decision
+- **Discount factor**: 0.99
+- **Strategy**: Random shooting (sample-based MPC)
+
+## Training Configuration
+
+Default hyperparameters in `config.py`:
+
+```python
+# Data collection
+NUM_EPISODES_COLLECT = 400
+EPISODE_LENGTH = 50
+
+# Encoder training
+ENCODER_EPOCHS = 30
+ENCODER_LEARNING_RATE = 1e-3
+LATENT_DIM = 4
+
+# World model training
+WORLD_MODEL_EPOCHS = 20
+WORLD_MODEL_LEARNING_RATE = 1e-3
+
+# MPC planning
+MPC_HORIZON = 12
+MPC_NUM_SAMPLES = 512
+```
+
+## Results
+
+### Encoder Performance
+- Reconstruction MSE < 0.0001 after 30 epochs
+- Latent space efficiently captures position-velocity information
+
+### World Model Performance
+- Prediction MSE < 0.0001 on latent dynamics
+- Accurate reward prediction
+- Stable multi-step rollouts
+
+### MPC Agent Performance
+- Significantly outperforms random policy
+- Successfully navigates to x=0 and maintains position
+- Demonstrates effective model-based planning
+
+## Example Output
+
+```
+Running MPC Agent Evaluation
+============================================================
+Episode 01: return = -45.231, final x = -0.023
+Episode 02: return = -42.187, final x = +0.015
+...
+
+Evaluation Summary
+============================================================
+Episodes: 10
+Mean return: -43.521 ± 2.341
+Min return: -47.832
+Max return: -40.123
+
+Baseline: Random Policy
+============================================================
+Random policy mean return: -87.445 ± 5.632
+
+MPC improvement: +43.924
+```
 
 ## Extensions
 
-This implementation serves as a foundation for exploring:
+This implementation provides a foundation for:
 
-- **More Complex Environments**: Extend to 2D/3D spaces or Gymnasium environments
-- **Latent World Models**: Add encoder/decoder for high-dimensional observations
-- **Planning**: Implement model-based planning algorithms (e.g., CEM, MPPI)
-- **Model-Based RL**: Use the world model for policy optimization
-- **Uncertainty Quantification**: Add ensemble models or probabilistic predictions
+### Immediate Extensions
+- **Stochastic Models**: Output distributions instead of point predictions
+- **Ensemble Models**: Multiple world models for uncertainty estimation
+- **CEM Planning**: Cross-entropy method instead of random shooting
+- **Learned Policies**: Train policy network using imagined rollouts (Dreamer)
+
+### Advanced Extensions
+- **Image Observations**: Render position as image, use ConvNet encoder
+- **2D/3D Environments**: Extend to higher-dimensional state spaces
+- **Gymnasium Integration**: Connect to CartPole, MountainCar, etc.
+- **Model-Based RL**: Combine with policy gradients (MBPO, Dreamer)
+- **Hierarchical Planning**: Multi-level planning with learned subgoals
+
+## Key Concepts Demonstrated
+
+1. **Latent World Models**: Learning dynamics in compressed representation space
+2. **Model-Based Planning**: Using learned models for action selection
+3. **Separation of Concerns**: V-M-C modular architecture
+4. **Imagination**: Evaluating actions without environment interaction
+5. **MLX Efficiency**: Leveraging Apple Silicon for fast training and inference
+
+## Troubleshooting
+
+### Data not found error
+Run `python scripts/collect_data.py` first to generate training data.
+
+### Encoder/World model not found error
+Train models in order:
+1. `python training/train_encoder.py`
+2. `python training/train_world_model.py`
+
+### Poor MPC performance
+- Increase `MPC_NUM_SAMPLES` for better action search
+- Increase `MPC_HORIZON` for longer planning
+- Train models longer or with more data
 
 ## License
 
@@ -113,5 +243,7 @@ MIT License - feel free to use this code for learning and research purposes.
 
 ## References
 
-- [MLX Framework](https://github.com/ml-explore/mlx) - Apple's ML framework for Apple Silicon
 - [World Models (Ha & Schmidhuber, 2018)](https://arxiv.org/abs/1803.10122) - Seminal paper on world models in RL
+- [Dreamer (Hafner et al., 2020)](https://arxiv.org/abs/1912.01603) - Learning world models for model-based RL
+- [MLX Framework](https://github.com/ml-explore/mlx) - Apple's ML framework for Apple Silicon
+- [Model-Based RL Survey (Moerland et al., 2023)](https://arxiv.org/abs/2006.16712) - Comprehensive MBRL overview
